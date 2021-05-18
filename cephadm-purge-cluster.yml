@@ -1,0 +1,48 @@
+---
+- hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - import_role:
+        name: ceph-defaults
+
+    - name: gather and delegate facts
+      setup:
+        gather_subset:
+          - 'all'
+          - '!facter'
+          - '!ohai'
+      delegate_to: "{{ item }}"
+      delegate_facts: True
+      with_items: "{{ groups['all'] | difference(groups.get('clients', [])) }}"
+      run_once: true
+      when: delegate_facts_host | bool
+      tags: always
+
+    - name: check if podman binary is present
+      stat:
+        path: /usr/bin/podman
+      register: podman_binary
+
+    - name: set_fact container_binary
+      set_fact:
+        container_binary: "{{ 'podman' if (podman_binary.stat.exists and ansible_facts['distribution'] == 'Fedora') or (ansible_facts['os_family'] == 'RedHat' and ansible_facts['distribution_major_version'] == '8') else 'docker' }}"
+      when: inventory_hostname in (groups['all'] | difference(groups.get('clients', [])))
+
+    - name: set_fact cephadm_cmd
+      set_fact:
+        cephadm_cmd: "cephadm {{ '--docker' if container_binary == 'docker' else '' }}"
+
+    - name: get cluster fsid
+      command: "{{ cephadm_cmd }} shell -- ceph --cluster {{ cluster }} fsid"
+      register: cluster_fsid
+      run_once: true
+      when: inventory_hostname in groups.get(mon_group_name, []) or '_admin' in labels | default([])
+
+    - name: set_fact fsid
+      set_fact:
+        fsid: "{{ cluster_fsid.stdout }}"
+      run_once: true
+
+    - name: purge ceph cluster
+      command: "{{ cephadm_cmd }} rm-cluster --force --zap-osds --fsid {{ fsid }}"
